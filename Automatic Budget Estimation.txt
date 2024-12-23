@@ -314,8 +314,8 @@ def check_unseen_messages_with_attachments(username, password):
 
 
 def main(): 
-    EMAIL_USER = "shreeharinibabu@gmail.com"
-    EMAIL_PASS = "wwdz lmmb gdod ejsl"  
+    EMAIL_USER = "shreehariniinnowell@gmail.com"
+    EMAIL_PASS = "gocm mxhu xooc akkk"  
     check_unseen_messages_with_attachments(EMAIL_USER, EMAIL_PASS)
 if __name__ == "__main__":
     main()
