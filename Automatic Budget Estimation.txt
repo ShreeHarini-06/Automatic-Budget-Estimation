@@ -1,0 +1,321 @@
+import imaplib
+import email
+from email.header import decode_header
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+from email.utils import formataddr
+from email.mime.text import MIMEText
+import fitz 
+from PyPDF2 import PdfReader
+from fpdf import FPDF
+import re
+import pdfplumber
+import pymongo
+import random
+from fpdf.enums import XPos, YPos
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
+
+
+def extract_image_from_pdf(input_pdf_path, output_image_path, page_number=0):
+    pdf_document = fitz.open(input_pdf_path)
+    page = pdf_document.load_page(page_number)
+    images = page.get_images(full=True)
+    if images:
+        xref = images[0][0]
+        base_image = pdf_document.extract_image(xref)
+        image_bytes = base_image["image"]
+
+        with open(output_image_path, "wb") as image_file:
+            image_file.write(image_bytes)
+            print(f"Image extracted and saved to {output_image_path}")
+    else:
+        print("No images found in the PDF.")
+
+
+def extract_text_from_pdf(input_pdf_path):
+    reader = PdfReader(input_pdf_path)
+    first_page_text = reader.pages[0].extract_text()
+    cleaned_text = re.sub(r'([a-z])([A-Z])', r'\1 \2', first_page_text).replace("\n", " ").strip()
+    specifications = {
+        "Style Number": "Not Found",
+        "Style": "Not Found",
+        "Brand": "Not Found",
+        "Sizes": "Not Found",
+        "Commodity": "Not Found",
+        "E-mail": "Not Found",
+        "Care Address": "Not Found"
+    }
+    patterns = {
+        "Style": r"Style:\s*(.*?)\s*Stylenumber", 
+        "Style Number":r"Stylenumber:\s*(\d+)",
+        "Brand": r"Brand:\s*(.*?)\s*Sizes",
+        "Sizes": r"Sizes:\s*(.*?)\s*Commodity",
+        "Commodity": r"Commodity:\s*(.*?)\s*E-mail",
+        "E-mail": r"E-mail:\s*([\w\.-]+@[\w\.-]+\.\w+)",
+        "Care Address" : r"Care Address:\s*(.*?)(?=\s*\w+:\s*|$)"
+    }
+    for key, pattern in patterns.items():
+        match = re.search(pattern, cleaned_text, re.DOTALL)
+        if match:
+            specifications[key] = match.group(1).strip()
+    return specifications
+
+
+def extract_spec_sheet_table(pdf_path, table_index=0):
+    with pdfplumber.open(pdf_path) as pdf:
+        last_page = pdf.pages[-1]
+        tables = last_page.extract_tables()
+        if table_index < len(tables):
+            return tables[table_index]
+        else:
+            return None
+
+
+
+def store_in_mongodb(table, db_name, collection_name):
+    client = pymongo.MongoClient("mongodb://localhost:27017/")
+    db = client[db_name]
+    collection = db[collection_name]
+
+    for row in table[1:]:
+        try:
+            description = row[0]
+            qty = int(row[1])
+            per_rate = round(random.uniform(0.1, 5.0), 2)
+            composition = row[2]
+            document = {
+                "Description": description,
+                "Qty": qty,
+                "Per Rate": per_rate,
+                "Composition": composition
+            }
+            collection.insert_one(document)
+        except (ValueError, IndexError) as e:
+            print(f"Error processing row {row}: {e}")
+
+
+
+def create_output_pdf(table, output_pdf_path, specifications, image_path):
+    pdf = FPDF()
+    pdf.add_page()
+    font_dir = r"C:\Users\harin\Desktop\innowell\fonts"
+    pdf.add_font("DejaVu", "", os.path.join(font_dir, "DejaVuSans.ttf"), uni=True)
+    pdf.add_font("DejaVu", "B", os.path.join(font_dir, "dejavu-sans-bold.ttf"), uni=True)
+    pdf.set_font("DejaVu", size=12)
+    pdf.set_font("DejaVu", style='B', size=10)
+    pdf.cell(0, 10, "Costing Sheet", align="C", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5) 
+
+    for label, value in specifications.items():
+        pdf.set_font("DejaVu", style='B', size=12)
+        pdf.cell(50, 10, f"{label}: ", new_x="RIGHT", new_y="TOP")
+        pdf.set_font("DejaVu", '', 10)
+        if label == "E-mail":
+            pdf.set_text_color(0, 0, 255)  
+            pdf.set_font(style='U')  
+            pdf.multi_cell(0, 10, value)  
+            pdf.set_text_color(0, 0, 0) 
+            pdf.set_font(style='')
+        else:
+            if "560029" in value:
+                
+                value = re.sub(r'(.*)(560029)', r'\1\n\2', value)
+            pdf.multi_cell(180, 10, value) 
+        pdf.ln(2)  
+
+    pdf.image(image_path, x=150, y=40, w=40, h=50)
+    pdf.ln(10)
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "Spec Sheet:", align="L", new_x="LMARGIN", new_y="NEXT")
+
+    pdf.set_font("Arial", 'B', 12)
+    pdf.set_line_width(0.5)
+    pdf.cell(50, 10, 'Placement', 1, align="C")
+    pdf.cell(70, 10, 'Composition', 1, align="C")
+    pdf.cell(20, 10, 'Qty', 1, align="C")
+    pdf.cell(25, 10, 'Per Rate', 1, align="C")
+    pdf.cell(25, 10, 'Total', 1, align="C")
+    pdf.ln()
+
+    total_sum = 0
+
+    pdf.set_font("Arial", '', 11)
+    for row in table[1:]:
+        try:
+            description = row[0]
+            composition = row[2]
+            qty = int(row[1])
+            per_rate = round(random.uniform(0.1, 5.0), 2)
+            total = round(qty * per_rate, 2)
+            total_sum += total
+
+            pdf.cell(50, 10, description, 1)
+            if pdf.get_string_width(composition) > 70:
+                x = pdf.get_x()
+                y = pdf.get_y()
+                pdf.multi_cell(70, 5, composition, 1)  
+                pdf.set_xy(x + 70, y)  
+            else:
+                pdf.cell(70, 10, composition, 1)
+            pdf.cell(20, 10, str(qty), 1, align="C")
+            pdf.cell(25, 10, str(per_rate), 1, align="C")
+            pdf.cell(25, 10, str(total), 1, align="R")
+            pdf.ln(10)
+        except (ValueError, IndexError) as e:
+            print(f"Error processing row {row}: {e}")
+
+    pdf.set_font("Arial", 'B', 11)
+    pdf.cell(165, 10, 'Total', 1, 0, 'C')
+    pdf.cell(25, 10, f"{total_sum:.2f}", 1, 0, 'R')
+    pdf.ln()
+
+    pdf.output(output_pdf_path)
+    print(f"PDF saved to {output_pdf_path}")
+
+
+
+def create_output_excel(table, output_excel_path):
+    wb = Workbook()
+    ws = wb.active  
+    headers = ["Placement", "Quantity", "Per Rate", "Composition"]
+    ws.append(headers)  
+    for row in table[1:]:
+        try:
+            description = row[0]
+            qty = int(row[1])
+            per_rate = round(random.uniform(0.1, 5.0), 2)
+            composition = row[2]
+            ws.append([description, qty, per_rate, composition])
+        except (ValueError, IndexError) as e:
+            print(f"Error processing row {row}: {e}")
+
+   
+    header_font = Font(bold=True)
+    for cell in ws[1]:  
+        cell.font = header_font
+
+    
+    for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+        for cell in row:
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    
+    for col in ws.columns:
+        max_length = 0
+        column = col[0].column_letter  
+        for cell in col:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(cell.value)
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        ws.column_dimensions[column].width = adjusted_width
+    wb.save(output_excel_path)
+    print(f"Excel sheet has been created and saved to {output_excel_path}")
+
+
+
+def send_email_with_attachments(to_email, from_email, from_password, subject, body, attachments):
+    msg = MIMEMultipart()
+    msg['From'] = formataddr(('Shree Harini', from_email))
+    msg['To'] = to_email
+    msg['Subject'] = subject
+
+    msg.attach(MIMEText(body, 'plain'))
+
+    for file in attachments:
+        attachment = open(file, 'rb')
+        part = MIMEBase('application', 'octet-stream')
+        part.set_payload(attachment.read())
+        encoders.encode_base64(part)
+        part.add_header('Content-Disposition', f"attachment; filename= {os.path.basename(file)}")
+        msg.attach(part)
+
+    server = smtplib.SMTP('smtp.gmail.com', 587)
+    server.starttls()
+    server.login(from_email, from_password)
+    text = msg.as_string()
+    server.sendmail(from_email, to_email, text)
+    server.quit()
+    print(f"Email sent to {to_email}")
+
+
+def check_unseen_messages_with_attachments(username, password):
+    try:  
+        imap_server = "imap.gmail.com"
+        imap = imaplib.IMAP4_SSL(imap_server)  
+        imap.login(username, password)
+        print("Logged into email successfully.")
+        imap.select("inbox")
+        status, messages = imap.search(None, "(UNSEEN)")
+        if messages[0]:
+            email_ids = messages[0].split()
+            print(f"Found {len(email_ids)} unseen message(s).")
+            for email_id in email_ids:
+                status, msg_data = imap.fetch(email_id, "(RFC822)")
+                
+                for response_part in msg_data:
+                    if isinstance(response_part, tuple):
+                        msg = email.message_from_bytes(response_part[1])
+                        subject, encoding = decode_header(msg["Subject"])[0]
+                        if isinstance(subject, bytes):
+                            subject = subject.decode(encoding if encoding else 'utf-8')
+                        from_email = msg.get("From")
+                        from_email = decode_header(from_email)[0][0]
+                        if isinstance(from_email, bytes):
+                            from_email = from_email.decode()
+                        
+                        print(f"Checking email: Subject - {subject}, From: {from_email}")
+                        has_attachment = False
+                        for part in msg.walk():    
+                            if part.get_content_disposition() == "attachment":
+                                has_attachment = True
+                                filename = part.get_filename()
+                                if filename:
+                                    filename = decode_header(filename)[0][0]
+                                    if isinstance(filename, bytes):
+                                        filename = filename.decode()
+                                    print(f"Attachment found: {filename}")  
+                                    if filename.endswith('.pdf'):
+                                        filepath = os.path.join(os.path.expanduser("~"), "Downloads", filename)
+                                        with open(filepath, "wb") as f:
+                                            f.write(part.get_payload(decode=True))
+                                            print(f"Downloaded PDF file: {filename}")
+                                        spec_sheet_table = extract_spec_sheet_table(filepath, table_index=0)
+                                        if spec_sheet_table:
+                                            store_in_mongodb(spec_sheet_table, 'db', 'data')
+                                            output_image_path = os.path.join(os.path.expanduser("~"), "Downloads", "shirt.jpg")
+                                            extract_image_from_pdf(filepath, output_image_path)
+                                            specifications = extract_text_from_pdf(filepath)
+                                            output_pdf_path = os.path.join(os.path.expanduser("~"), "Desktop", "outputimage.pdf")
+                                            output_excel_path = os.path.join(os.path.expanduser("~"), "Desktop", "spec_sheet.xlsx")
+                                            create_output_pdf(spec_sheet_table, output_pdf_path, specifications, output_image_path)
+                                            create_output_excel(spec_sheet_table, output_excel_path)
+                                            email_subject = f"Processed Spec Sheet for {subject}"
+                                            email_body = "Please find attached the processed spec sheet in both PDF and Excel formats."
+                                            send_email_with_attachments(from_email, username, password, email_subject, email_body, [output_pdf_path, output_excel_path])
+                                        else:
+                                            print("No table found at the specified index.")
+                        
+                        if not has_attachment:
+                            print("No attachments found in this email.")
+        else:
+            print("No unseen emails found.")
+        imap.logout()
+        
+    except imaplib.IMAP4.error as e:
+        print(f"Error connecting to the email server: {e}")
+
+
+def main(): 
+    EMAIL_USER = "shreeharinibabu@gmail.com"
+    EMAIL_PASS = "wwdz lmmb gdod ejsl"  
+    check_unseen_messages_with_attachments(EMAIL_USER, EMAIL_PASS)
+if __name__ == "__main__":
+    main()
